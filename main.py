@@ -5,7 +5,7 @@ import threading
 import time
 import requests
 from flask import Flask, request
-from telegram import Update, Bot, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # تنظیمات اولیه
@@ -15,7 +15,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 THRESHOLD = 10000
 CHECK_INTERVAL = 60
 
-# لاگ‌گیری Negotiation
+# لاگ‌گیری
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,14 @@ keyboard = ReplyKeyboardMarkup(
 # دریافت قیمت‌ها
 def get_prices():
     try:
-        res = requests.get("https://api.tgju.org/v1/price/latest")
-        data = res.json()["data"]
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        res = requests.get("https://api.tgju.org/v1/price/latest", headers=headers, timeout=10)
+        res.raise_for_status()  # چک کردن خطاهای HTTP
+        try:
+            data = res.json()["data"]
+        except ValueError as e:
+            logger.error(f"خطا در تجزیه JSON: {e}. پاسخ خام: {res.text[:100]}")
+            return None
         prices = {}
         keys = {
             "price_dollar_rl": "دلار",
@@ -50,7 +56,7 @@ def get_prices():
             else:
                 logger.warning(f"کلید {key} در پاسخ API یافت نشد")
         return prices
-    except Exception as e:
+    except requests.RequestException as e:
         logger.error(f"خطا در دریافت قیمت‌ها: {e}")
         return None
 
@@ -64,7 +70,7 @@ def price_checker():
                 old_price = last_prices.get(name)
                 if old_price is None:
                     last_prices[name] = new_price
-                elif abs(new_price - old_price) >= THRESHOLD:
+                elif abs(new_price - old_price) >= TH personally:
                     last_prices[name] = new_price
                     asyncio.run_coroutine_threadsafe(send_price_alert(name, new_price), loop)
         time.sleep(CHECK_INTERVAL)
@@ -103,7 +109,7 @@ async def now(update: Update, context):
         msg = "💹 قیمت لحظه‌ای:\n" + "\n".join(f"{name}: {price:,} ریال" for name, price in prices.items())
         await update.message.reply_text(msg, reply_markup=keyboard)
     else:
-        await update.message.reply_text("❌ خطا در دریافت قیمت‌ها.", reply_markup=keyboard)
+        await update.message.reply_text("❌ خطا در دریافت قیمت‌ها. لطفاً بعداً دوباره امتحان کنید.", reply_markup=keyboard)
 
 async def handle_buttons(update: Update, context):
     text = update.message.text
@@ -132,11 +138,22 @@ def webhook():
     asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "OK"
 
-# حلقه asyncio
-loop = asyncio.get_event_loop()
+# مدیریت حلقه asyncio و وب‌هوک
+async def main():
+    await application.bot.set_webhook(url=WEBHOOK_URL)
+    await application.start()
+    logger.info("وب‌هوک تنظیم شد و ربات شروع به کار کرد.")
 
 # اجرا
 if __name__ == "__main__":
-    application.bot.set_webhook(url=WEBHOOK_URL)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     threading.Thread(target=price_checker, daemon=True).start()
-    app.run(host="0.0.0.0", port=8443)
+    
+    # اجرای وب‌هوک و سرور Flask
+    try:
+        loop.run_until_complete(main())
+        app.run(host="0.0.0.0", port=8443)
+    finally:
+        loop.run_until_complete(application.stop())
+        loop.close()
