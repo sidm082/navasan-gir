@@ -1,52 +1,65 @@
+import os
+import logging
+import threading
+import time
+import requests
 from flask import Flask, request
 from telegram import Update, Bot, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
-import requests
-import threading
-import time
 
+# تنظیمات اولیه
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 THRESHOLD = 10000
 CHECK_INTERVAL = 60
 
+# لاگ‌گیری
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
 bot = Bot(token=TOKEN)
-app = Flask(name)
+app = Flask(__name__)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 subscribed_chats = set()
+subscribed_chats_lock = threading.Lock()
 last_prices = {}
+running = True  # پرچم برای توقف ترد
 
-# === دکمه‌های کیبورد ===
+# دکمه‌ها
 keyboard = ReplyKeyboardMarkup(
-    [
-        ["📥 دریافت قیمت لحظه‌ای"],
-        ["✅ فعال‌سازی هشدار نوسان", "🛑 توقف هشدار نوسان"]
-    ],
+    [["📥 دریافت قیمت لحظه‌ای"], ["✅ فعال‌سازی هشدار نوسان", "🛑 توقف هشدار نوسان"]],
     resize_keyboard=True
 )
 
-# === گرفتن قیمت‌ها ===
+# دریافت قیمت‌ها
 def get_prices():
     try:
         res = requests.get("https://api.tgju.org/v1/price/latest")
         data = res.json()["data"]
-        return {
-            "دلار": int(data["price_dollar_rl"]["p"]),
-            "یورو": int(data["price_eur"]["p"]),
-            "طلا (گرم ۱۸)": int(data["geram18"]["p"]),
-            "بیت‌کوین": int(data["crypto-bitcoin"]["p"]),
-            "اتریوم": int(data["crypto-ethereum"]["p"]),
+        prices = {}
+        keys = {
+            "price_dollar_rl": "دلار",
+            "price_eur": "یورو",
+            "geram18": "طلا (گرم ۱۸)",
+            "crypto-bitcoin": "بیت‌کوین",
+            "crypto-ethereum": "اتریوم"
         }
+        for key, name in keys.items():
+            if key in data:
+                prices[name] = int(data[key]["p"])
+            else:
+                logger.warning(f"کلید {key} در پاسخ API یافت نشد")
+        return prices
     except Exception as e:
-        print("❌ خطا در دریافت قیمت:", e)
+        logger.error(f"خطا در دریافت قیمت‌ها: {e}")
         return None
 
-# === بررسی نوسان ===
+# بررسی نوسان قیمت
 def price_checker():
     global last_prices
-    while True:
+    while running:
         current = get_prices()
         if current:
             for name, new_price in current.items():
@@ -60,41 +73,41 @@ def price_checker():
 
 def send_price_alert(name, price):
     msg = f"📢 قیمت {name} تغییر کرد!\n📈 قیمت جدید: {price:,} ریال"
-    for chat_id in subscribed_chats:
-        try:
-            bot.send_message(chat_id=chat_id, text=msg)
-        except:
-            pass
+    with subscribed_chats_lock:
+        for chat_id in subscribed_chats.copy():
+            try:
+                bot.send_message(chat_id=chat_id, text=msg)
+            except Exception as e:
+                logger.error(f"خطا در ارسال پیام به {chat_id}: {e}")
 
-# === فرمان‌ها ===
+# فرمان‌ها
 def start(update, context):
     chat_id = update.effective_chat.id
-    subscribed_chats.add(chat_id)
+    with subscribed_chats_lock:
+        subscribed_chats.add(chat_id)
     update.message.reply_text(
-        "✅ هشدار نوسان قیمت فعال شد.\n"
-        "در صورت نوسان بالای ۲۰,۰۰۰ ریال در هر ارز، به شما اطلاع داده خواهد شد.",
+        "✅ هشدار نوسان قیمت فعال شد.\nدر صورت نوسان بالای ۱۰,۰۰۰ ریال به شما اطلاع داده می‌شود.",
         reply_markup=keyboard
     )
 
 def stop(update, context):
     chat_id = update.effective_chat.id
-    if chat_id in subscribed_chats:
-        subscribed_chats.remove(chat_id)
-        update.message.reply_text("🛑 هشدار قیمت غیرفعال شد.", reply_markup=keyboard)
-    else:
-        update.message.reply_text("شما عضو هشدار نبودید.", reply_markup=keyboard)
+    with subscribed_chats_lock:
+        if chat_id in subscribed_chats:
+            subscribed_chats.remove(chat_id)
+            update.message.reply_text("🛑 هشدار قیمت غیرفعال شد.", reply_markup=keyboard)
+        else:
+            update.message.reply_text("شما عضو هشدار نبودید.", reply_markup=keyboard)
 
 def now(update, context):
     prices = get_prices()
     if prices:
-        msg = "💹 قیمت لحظه‌ای:\n"
-        for name, price in prices.items():
-            msg += f"{name}: {price:,} ریال\n"
+        msg = "💹 قیمت لحظه‌ای:\n" + "\n".join(f"{name}: {price:,} ریال" for name, price in prices.items())
         update.message.reply_text(msg, reply_markup=keyboard)
     else:
         update.message.reply_text("❌ خطا در دریافت قیمت‌ها.", reply_markup=keyboard)
 
-# === پاسخ به دکمه‌ها ===
+# پاسخ به دکمه‌ها
 def handle_buttons(update, context):
     text = update.message.text
     if text == "📥 دریافت قیمت لحظه‌ای":
@@ -104,21 +117,23 @@ def handle_buttons(update, context):
     elif text == "🛑 توقف هشدار نوسان":
         stop(update, context)
 
-# === اتصال فرمان‌ها ===
+# اتصال فرمان‌ها
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("stop", stop))
 dispatcher.add_handler(CommandHandler("now", now))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_buttons))
 
-# === وب‌هوک ===
+# وب‌هوک
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        return "Unauthorized", 403
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
     return "OK"
 
-# === اجرا ===
-if name == "main":
+# اجرا
+if __name__ == "__main__":
     bot.set_webhook(url=WEBHOOK_URL)
     threading.Thread(target=price_checker, daemon=True).start()
     app.run(host="0.0.0.0", port=8443)
