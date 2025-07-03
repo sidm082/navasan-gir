@@ -140,6 +140,7 @@ def webhook():
 
 # مدیریت حلقه asyncio و وب‌هوک
 async def main():
+    await application.initialize()  # مقداردهی اولیه
     await application.bot.set_webhook(url=WEBHOOK_URL)
     await application.start()
     logger.info("وب‌هوک تنظیم شد و ربات شروع به کار کرد.")
