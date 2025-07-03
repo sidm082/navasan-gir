@@ -70,7 +70,7 @@ def price_checker():
                 old_price = last_prices.get(name)
                 if old_price is None:
                     last_prices[name] = new_price
-                elif abs(new_price - old_price) >= TH personally:
+                elif abs(new_price - old_price) >= THRESHOLD:
                     last_prices[name] = new_price
                     asyncio.run_coroutine_threadsafe(send_price_alert(name, new_price), loop)
         time.sleep(CHECK_INTERVAL)
