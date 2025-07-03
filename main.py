@@ -33,31 +33,33 @@ keyboard = ReplyKeyboardMarkup(
 
 # دریافت قیمت‌ها
 def get_prices():
+    prices = {}
     try:
+        # دریافت قیمت ارزهای دیجیتال از CoinGecko
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        res = requests.get("https://api.tgju.org/v1/price/latest", headers=headers, timeout=10)
-        res.raise_for_status()  # چک کردن خطاهای HTTP
-        try:
-            data = res.json()["data"]
-        except ValueError as e:
-            logger.error(f"خطا در تجزیه JSON: {e}. پاسخ خام: {res.text[:100]}")
-            return None
-        prices = {}
-        keys = {
-            "price_dollar_rl": "دلار",
-            "price_eur": "یورو",
-            "geram18": "طلا (گرم ۱۸)",
-            "crypto-bitcoin": "بیت‌کوین",
-            "crypto-ethereum": "اتریوم"
-        }
-        for key, name in keys.items():
-            if key in data:
-                prices[name] = int(data[key]["p"])
-            else:
-                logger.warning(f"کلید {key} در پاسخ API یافت نشد")
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd",
+            headers=headers,
+            timeout=10
+        )
+        res.raise_for_status()
+        data = res.json()
+        
+        # تبدیل قیمت‌های USD به ریال (نرخ تقریبی: 1 دلار = 600,000 ریال)
+        USD_TO_RIAL = 600000
+        if "bitcoin" in data:
+            prices["بیت‌کوین"] = int(data["bitcoin"]["usd"] * USD_TO_RIAL)
+        if "ethereum" in data:
+            prices["اتریوم"] = int(data["ethereum"]["usd"] * USD_TO_RIAL)
+        
+        # برای دلار، یورو و طلا تا پیدا کردن API مناسب
+        prices["دلار"] = None
+        prices["یورو"] = None
+        prices["طلا (گرم ۱۸)"] = None
+        
         return prices
     except requests.RequestException as e:
-        logger.error(f"خطا در دریافت قیمت‌ها: {e}")
+        logger.error(f"خطا در دریافت قیمت‌ها از CoinGecko: {e}")
         return None
 
 # بررسی نوسان قیمت
@@ -67,6 +69,8 @@ def price_checker():
         current = get_prices()
         if current:
             for name, new_price in current.items():
+                if new_price is None:  # برای ارزهایی که API نداریم
+                    continue
                 old_price = last_prices.get(name)
                 if old_price is None:
                     last_prices[name] = new_price
@@ -106,7 +110,12 @@ async def stop(update: Update, context):
 async def now(update: Update, context):
     prices = get_prices()
     if prices:
-        msg = "💹 قیمت لحظه‌ای:\n" + "\n".join(f"{name}: {price:,} ریال" for name, price in prices.items())
+        msg = "💹 قیمت لحظه‌ای:\n"
+        for name, price in prices.items():
+            if price is None:
+                msg += f"{name}: در حال حاضر در دسترس نیست\n"
+            else:
+                msg += f"{name}: {price:,} ریال\n"
         await update.message.reply_text(msg, reply_markup=keyboard)
     else:
         await update.message.reply_text("❌ خطا در دریافت قیمت‌ها. لطفاً بعداً دوباره امتحان کنید.", reply_markup=keyboard)
@@ -140,7 +149,7 @@ def webhook():
 
 # مدیریت حلقه asyncio و وب‌هوک
 async def main():
-    await application.initialize()  # مقداردهی اولیه
+    await application.initialize()
     await application.bot.set_webhook(url=WEBHOOK_URL)
     await application.start()
     logger.info("وب‌هوک تنظیم شد و ربات شروع به کار کرد.")
